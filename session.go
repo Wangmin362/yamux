@@ -190,11 +190,12 @@ GET_ID:
 	s.inflight[id] = struct{}{}
 	s.streamLock.Unlock()
 
-	if s.config.StreamOpenTimeout > 0 {
+	if s.config.StreamOpenTimeout > 0 { // 在指定时间内如果建立一个Stream一直没有建立好，就直接关闭Session
 		go s.setOpenTimeout(stream)
 	}
 
 	// Send the window update to create
+	// 更新窗口
 	if err := stream.sendWindowUpdate(); err != nil {
 		select {
 		case <-s.synCh:
@@ -241,12 +242,12 @@ func (s *Session) Accept() (net.Conn, error) {
 // is ready to be accepted.
 func (s *Session) AcceptStream() (*Stream, error) {
 	select {
-	case stream := <-s.acceptCh:
+	case stream := <-s.acceptCh: // 等待新的Stream的建立
 		if err := stream.sendWindowUpdate(); err != nil {
 			return nil, err
 		}
 		return stream, nil
-	case <-s.shutdownCh:
+	case <-s.shutdownCh: // 也有可能在等待的过程中，会话被关闭，此时无需在等待
 		return nil, s.shutdownErr
 	}
 }
@@ -255,7 +256,7 @@ func (s *Session) AcceptStream() (*Stream, error) {
 // is ready to be accepted.
 func (s *Session) AcceptStreamWithContext(ctx context.Context) (*Stream, error) {
 	select {
-	case <-ctx.Done():
+	case <-ctx.Done(): // 相比于AcceptStream，这里可以给用户一定的自由度，自己可以控制等待多久
 		return nil, ctx.Err()
 	case stream := <-s.acceptCh:
 		if err := stream.sendWindowUpdate(); err != nil {
@@ -581,6 +582,7 @@ func (s *Session) handleStreamMessage(hdr header) error {
 	id := hdr.StreamID()
 	flags := hdr.Flags()
 	if flags&flagSYN == flagSYN {
+		// 说明有新的Stream建立
 		if err := s.incomingStream(id); err != nil {
 			return err
 		}
@@ -693,7 +695,7 @@ func (s *Session) incomingStream(id uint32) error {
 	defer s.streamLock.Unlock()
 
 	// Check if stream already exists
-	if _, ok := s.streams[id]; ok {
+	if _, ok := s.streams[id]; ok { // 如果当前流已经存在，那么直接报错
 		s.logger.Printf("[ERR] yamux: duplicate stream declared")
 		if sendErr := s.sendNoWait(s.goAway(goAwayProtoErr)); sendErr != nil {
 			s.logger.Printf("[WARN] yamux: failed to send go away: %v", sendErr)
@@ -706,7 +708,7 @@ func (s *Session) incomingStream(id uint32) error {
 
 	// Check if we've exceeded the backlog
 	select {
-	case s.acceptCh <- stream:
+	case s.acceptCh <- stream: // 生产消费模型，这里作为生产者，实例化了一个Stream
 		return nil
 	default:
 		// Backlog exceeded! RST the stream

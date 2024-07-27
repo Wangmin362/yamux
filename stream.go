@@ -34,7 +34,7 @@ type Stream struct {
 	state     streamState
 	stateLock sync.Mutex
 
-	recvBuf  *bytes.Buffer
+	recvBuf  *bytes.Buffer // 用于接收数据
 	recvLock sync.Mutex
 
 	controlHdr     header
@@ -63,18 +63,18 @@ type Stream struct {
 // a given session for an ID
 func newStream(session *Session, id uint32, state streamState) *Stream {
 	s := &Stream{
-		id:           id,
-		session:      session,
-		state:        state,
-		controlHdr:   header(make([]byte, headerSize)),
+		id:           id,                               // 流ID，若是客户端创建的流，那么ID为奇数；若为服务端创建的流，那么ID为偶数
+		session:      session,                          // 当前会话逻辑，会话底层持有的其实就是TCP连接
+		state:        state,                            // 当前流的状态
+		controlHdr:   header(make([]byte, headerSize)), // TODO 什么叫做控制头，什么叫做发送头？
 		controlErr:   make(chan error, 1),
 		sendHdr:      header(make([]byte, headerSize)),
 		sendErr:      make(chan error, 1),
-		recvWindow:   initialStreamWindow,
-		sendWindow:   initialStreamWindow,
-		recvNotifyCh: make(chan struct{}, 1),
-		sendNotifyCh: make(chan struct{}, 1),
-		establishCh:  make(chan struct{}, 1),
+		recvWindow:   initialStreamWindow,    // 接受窗口带大小
+		sendWindow:   initialStreamWindow,    // 发送窗口大小
+		recvNotifyCh: make(chan struct{}, 1), // 接受停止信号
+		sendNotifyCh: make(chan struct{}, 1), // 发送停止信号
+		establishCh:  make(chan struct{}, 1), // TODO 连接建立信号
 	}
 	s.readDeadline.Store(time.Time{})
 	s.writeDeadline.Store(time.Time{})
@@ -93,7 +93,7 @@ func (s *Stream) StreamID() uint32 {
 
 // Read is used to read from the stream
 func (s *Stream) Read(b []byte) (n int, err error) {
-	defer asyncNotify(s.recvNotifyCh)
+	defer asyncNotify(s.recvNotifyCh) // TODO 这里是在干嘛？
 START:
 	s.stateLock.Lock()
 	switch s.state {
@@ -106,8 +106,9 @@ START:
 		if s.recvBuf == nil || s.recvBuf.Len() == 0 {
 			s.recvLock.Unlock()
 			s.stateLock.Unlock()
-			return 0, io.EOF
+			return 0, io.EOF // 表示已经接受完成了
 		}
+		// TODO  到了这里，说明还没有接收完成数据
 		s.recvLock.Unlock()
 	case streamReset:
 		s.stateLock.Unlock()
@@ -115,9 +116,12 @@ START:
 	}
 	s.stateLock.Unlock()
 
+	// 接受数据
+
 	// If there is no data available, block
 	s.recvLock.Lock()
 	if s.recvBuf == nil || s.recvBuf.Len() == 0 {
+		// 如果此时Buf中没有数据，只能阻塞起来，等待数据的达赖
 		s.recvLock.Unlock()
 		goto WAIT
 	}
@@ -143,12 +147,12 @@ WAIT:
 		timeout = timer.C
 	}
 	select {
-	case <-s.recvNotifyCh:
+	case <-s.recvNotifyCh: // 说明来数据了，开始接收数据
 		if timer != nil {
 			timer.Stop()
 		}
 		goto START
-	case <-timeout:
+	case <-timeout: // 如果没有设置超时时间，那么timeout就是一个空的channel，因此就会一直阻塞
 		return 0, ErrTimeout
 	}
 }
@@ -158,7 +162,7 @@ func (s *Stream) Write(b []byte) (n int, err error) {
 	s.sendLock.Lock()
 	defer s.sendLock.Unlock()
 	total := 0
-	for total < len(b) {
+	for total < len(b) { // 根据窗口大小写入数据
 		n, err := s.write(b[total:])
 		total += n
 		if err != nil {
@@ -240,10 +244,10 @@ func (s *Stream) sendFlags() uint16 {
 	defer s.stateLock.Unlock()
 	var flags uint16
 	switch s.state {
-	case streamInit:
+	case streamInit: // 说明当前想要主动建立一个Stream
 		flags |= flagSYN
 		s.state = streamSYNSent
-	case streamSYNReceived:
+	case streamSYNReceived: // 说明当前是被动接受一个Stream的创建，因此需要恢复Ack，表示自己已经接收到了Stream新建的信号
 		flags |= flagACK
 		s.state = streamEstablished
 	}
@@ -263,12 +267,14 @@ func (s *Stream) sendWindowUpdate() error {
 	if s.recvBuf != nil {
 		bufLen = uint32(s.recvBuf.Len())
 	}
+	// TODO 如何理解这里的窗口计算
 	delta := (max - bufLen) - s.recvWindow
 
 	// Determine the flags if any
 	flags := s.sendFlags()
 
 	// Check if we can omit the update
+	// TODO 如何理解这里的逻辑
 	if delta < (max/2) && flags == 0 {
 		s.recvLock.Unlock()
 		return nil

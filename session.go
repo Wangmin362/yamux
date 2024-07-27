@@ -83,9 +83,9 @@ type Session struct {
 // sendReady is used to either mark a stream as ready
 // or to directly send a header
 type sendReady struct {
-	Hdr  []byte
+	Hdr  []byte     // 帧数据
 	mu   sync.Mutex // Protects Body from unsafe reads.
-	Body []byte
+	Body []byte     // 帧数据
 	Err  chan error
 }
 
@@ -97,13 +97,13 @@ func newSession(config *Config, conn io.ReadWriteCloser, client bool) *Session {
 	}
 
 	s := &Session{
-		config:     config,
-		logger:     logger,
-		conn:       conn,
-		bufRead:    bufio.NewReader(conn),
-		pings:      make(map[uint32]chan struct{}),
-		streams:    make(map[uint32]*Stream),
-		inflight:   make(map[uint32]struct{}),
+		config:     config,                         // 多路复用器的配置
+		logger:     logger,                         // 日志输出
+		conn:       conn,                           // 真正的底层TCP连接
+		bufRead:    bufio.NewReader(conn),          // 读取底层TCP的连接数据，多路复用器肯定需要组装逻辑帧，拼接成为一个完整的数据
+		pings:      make(map[uint32]chan struct{}), // 心跳
+		streams:    make(map[uint32]*Stream),       // 会话的Stream，key位Stream的ID
+		inflight:   make(map[uint32]struct{}),      // TODO 这玩意干嘛的？
 		synCh:      make(chan struct{}, config.AcceptBacklog),
 		acceptCh:   make(chan *Stream, config.AcceptBacklog),
 		sendCh:     make(chan *sendReady, 64),
@@ -112,13 +112,13 @@ func newSession(config *Config, conn io.ReadWriteCloser, client bool) *Session {
 		shutdownCh: make(chan struct{}),
 	}
 	if client {
-		s.nextStreamID = 1
+		s.nextStreamID = 1 // 客户端产生的流序号位奇数
 	} else {
-		s.nextStreamID = 2
+		s.nextStreamID = 2 // 服务端产生的流序号位偶数
 	}
-	go s.recv()
-	go s.send()
-	if config.EnableKeepAlive {
+	go s.recv()                 // 接收数据
+	go s.send()                 // 发送数据
+	if config.EnableKeepAlive { // 开启心跳，防止长时间没有通信的情况下断开连接
 		go s.keepalive()
 	}
 	return s
@@ -482,15 +482,16 @@ func (s *Session) sendLoop() error {
 		bodyBuf.Reset()
 
 		select {
-		case ready := <-s.sendCh:
+		case ready := <-s.sendCh: // 发送数据通道
 			// Send a header if ready
-			if ready.Hdr != nil {
+			if ready.Hdr != nil { // TODO 难道header可以为空？
 				_, err := s.conn.Write(ready.Hdr)
 				if err != nil {
 					s.logger.Printf("[ERR] yamux: Failed to write header: %v", err)
 					asyncSendErr(ready.Err, err)
 					return err
 				}
+				// 每次发送数据的时候其实都需要发送Header，因此在这里不需要置空
 			}
 
 			ready.mu.Lock()
@@ -586,12 +587,12 @@ func (s *Session) handleStreamMessage(hdr header) error {
 	}
 
 	// Get the stream
-	s.streamLock.Lock()
+	s.streamLock.Lock() // TODO 这里为什么不使用互斥锁？
 	stream := s.streams[id]
 	s.streamLock.Unlock()
 
 	// If we do not have a stream, likely we sent a RST
-	if stream == nil {
+	if stream == nil { // stream还没有建立，就直接开始传输数据，这里认为这种情况是一种非法情况，因此需要把数据丢弃
 		// Drain any data on the wire
 		if hdr.MsgType() == typeData && hdr.Length() > 0 {
 			s.logger.Printf("[WARN] yamux: Discarding data for stream: %d", id)
@@ -607,6 +608,7 @@ func (s *Session) handleStreamMessage(hdr header) error {
 
 	// Check if this is a window update
 	if hdr.MsgType() == typeWindowUpdate {
+		// 更新发送端的窗口
 		if err := stream.incrSendWindow(hdr, flags); err != nil {
 			if sendErr := s.sendNoWait(s.goAway(goAwayProtoErr)); sendErr != nil {
 				s.logger.Printf("[WARN] yamux: failed to send go away: %v", sendErr)
@@ -633,6 +635,7 @@ func (s *Session) handlePing(hdr header) error {
 
 	// Check if this is a query, respond back in a separate context so we
 	// don't interfere with the receiving thread blocking for the write.
+	// TODO 新建一个Stream
 	if flags&flagSYN == flagSYN {
 		go func() {
 			hdr := header(make([]byte, headerSize))

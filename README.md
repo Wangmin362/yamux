@@ -84,3 +84,8 @@ func server() {
 
 ```
 
+# QA
+
+## Session和Stream这两个概念有何区别？
+
+Session字面意思表示一个会话，其实可以理解为一个TCP连接，而Stream则真正对应连接中的流。

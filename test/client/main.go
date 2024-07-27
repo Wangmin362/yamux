@@ -12,13 +12,13 @@ func main() {
 		panic(err)
 	}
 
-	// Setup client side of yamux
+	// Setup client side of yamux  新建一个客户端会话
 	session, err := yamux.Client(conn, nil)
 	if err != nil {
 		panic(err)
 	}
 
-	// Open a new stream
+	// Open a new stream  打开一个Stream
 	stream, err := session.Open()
 	if err != nil {
 		panic(err)

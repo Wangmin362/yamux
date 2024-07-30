@@ -75,7 +75,7 @@ type Session struct {
 	// shutdown is used to safely close a session
 	shutdown        bool
 	shutdownErr     error
-	shutdownCh      chan struct{}
+	shutdownCh      chan struct{} // 用于判断当前session是否已经关闭
 	shutdownLock    sync.Mutex
 	shutdownErrLock sync.Mutex
 }
@@ -127,7 +127,7 @@ func newSession(config *Config, conn io.ReadWriteCloser, client bool) *Session {
 // IsClosed does a safe check to see if we have shutdown
 func (s *Session) IsClosed() bool {
 	select {
-	case <-s.shutdownCh:
+	case <-s.shutdownCh: // 这个channel一定是一个无缓冲chan，因为消费方根本就不关心，只要close了，这里一定能读出数据，可以可以读取无限次
 		return true
 	default:
 		return false

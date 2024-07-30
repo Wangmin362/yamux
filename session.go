@@ -21,6 +21,8 @@ import (
 type Session struct {
 	// remoteGoAway indicates the remote side does
 	// not want futher connections. Must be first for alignment.
+	// 远端已经关闭了，不再接受新的Stream
+	// TODO 1、这玩意什么时候改变的？
 	remoteGoAway int32
 
 	// localGoAway indicates that we should stop
@@ -38,9 +40,11 @@ type Session struct {
 	logger Logger
 
 	// conn is the underlying connection
+	// 底层的TCP连接
 	conn io.ReadWriteCloser
 
 	// bufRead is a buffered reader
+	// 全局的Buffer，用于从底层的TCP连接当中获取数据
 	bufRead *bufio.Reader
 
 	// pings is used to track inflight pings
@@ -52,12 +56,13 @@ type Session struct {
 	// for any outgoing stream that has not yet been established. Both are
 	// protected by streamLock.
 	streams    map[uint32]*Stream
-	inflight   map[uint32]struct{}
+	inflight   map[uint32]struct{} // 用于表示正在创建连接中的Stream，远端还没有回复ACK信号
 	streamLock sync.Mutex
 
 	// synCh acts like a semaphore. It is sized to the AcceptBacklog which
 	// is assumed to be symmetric between the client and server. This allows
 	// the client to avoid exceeding the backlog and instead blocks the open.
+	// TODO 这玩意有啥用？
 	synCh chan struct{}
 
 	// acceptCh is used to pass ready streams to the client
@@ -69,6 +74,7 @@ type Session struct {
 
 	// recvDoneCh is closed when recv() exits to avoid a race
 	// between stream registration and stream shutdown
+	// TODO 这个信号是干嘛的？
 	recvDoneCh chan struct{}
 	sendDoneCh chan struct{}
 
@@ -86,7 +92,9 @@ type sendReady struct {
 	Hdr  []byte     // 帧数据
 	mu   sync.Mutex // Protects Body from unsafe reads.
 	Body []byte     // 帧数据
-	Err  chan error
+	// 用于接收数据的发送结果
+	// TODO 这里为什么不需要返回成功发送的字节数？
+	Err chan error
 }
 
 // newSession is used to construct a new session
@@ -127,7 +135,7 @@ func newSession(config *Config, conn io.ReadWriteCloser, client bool) *Session {
 // IsClosed does a safe check to see if we have shutdown
 func (s *Session) IsClosed() bool {
 	select {
-	case <-s.shutdownCh: // 这个channel一定是一个无缓冲chan，因为消费方根本就不关心，只要close了，这里一定能读出数据，可以可以读取无限次
+	case <-s.shutdownCh: // 这个channel一定是一个无缓冲chan，因为消费方根本就不关心，只要close了，这里一定能读出数据，可以读取无限次
 		return true
 	default:
 		return false
@@ -168,7 +176,7 @@ func (s *Session) OpenStream() (*Stream, error) {
 
 	// Block if we have too many inflight SYNs
 	select {
-	case s.synCh <- struct{}{}:
+	case s.synCh <- struct{}{}: // 似乎是用来控制Session中的stream的数量
 	case <-s.shutdownCh:
 		return nil, ErrSessionShutdown
 	}
@@ -179,12 +187,15 @@ GET_ID:
 	if id >= math.MaxUint32-1 {
 		return nil, ErrStreamsExhausted
 	}
+	// 如果失败了，说明其它协程也想使用这个id，而且当前的协程竞争失败了，因此需要重新获取ID
 	if !atomic.CompareAndSwapUint32(&s.nextStreamID, id, id+2) {
 		goto GET_ID
 	}
 
+	// 到了这里说明，已经成功获取到了ID，并且把下一个可以使用的ID会写到了变量当中
+
 	// Register the stream
-	stream := newStream(s, id, streamInit)
+	stream := newStream(s, id, streamInit) // 实例化一个流
 	s.streamLock.Lock()
 	s.streams[id] = stream
 	s.inflight[id] = struct{}{}
@@ -198,7 +209,7 @@ GET_ID:
 	// 更新窗口
 	if err := stream.sendWindowUpdate(); err != nil {
 		select {
-		case <-s.synCh:
+		case <-s.synCh: // TODO 这个信号是用来干嘛的？
 		default:
 			s.logger.Printf("[ERR] yamux: aborted stream open without inflight syn semaphore")
 		}
@@ -216,13 +227,14 @@ func (s *Session) setOpenTimeout(stream *Stream) {
 	defer timer.Stop()
 
 	select {
-	case <-stream.establishCh:
+	case <-stream.establishCh: // 说明成功创建了Stream
 		return
-	case <-s.shutdownCh:
+	case <-s.shutdownCh: // 如果有协程关闭了Session，直接返回。因为Session都关闭了，创建Stream还有毛线意义
 		return
 	case <-timer.C:
 		// Timeout reached while waiting for ACK.
 		// Close the session to force connection re-establishment.
+		// 如果一个流在规定的时间之内没有成功建立，说明底层的TCP连接一定存在问题了，此时强制关闭底层的TCP连接
 		s.logger.Printf("[ERR] yamux: aborted stream open (destination=%s): %v", s.RemoteAddr().String(), ErrTimeout.err)
 		s.Close()
 	}
@@ -243,6 +255,7 @@ func (s *Session) Accept() (net.Conn, error) {
 func (s *Session) AcceptStream() (*Stream, error) {
 	select {
 	case stream := <-s.acceptCh: // 等待新的Stream的建立
+		// 当有新的流建立上来了，先更新窗口
 		if err := stream.sendWindowUpdate(); err != nil {
 			return nil, err
 		}
@@ -287,12 +300,15 @@ func (s *Session) Close() error {
 
 	close(s.shutdownCh)
 
+	// 关闭底层的TCP连接
 	s.conn.Close()
+	// TODO 等待底层TCP真正关闭完成？
 	<-s.recvDoneCh
 
 	s.streamLock.Lock()
 	defer s.streamLock.Unlock()
 	for _, stream := range s.streams {
+		// TODO 是怎么强制关闭流的？
 		stream.forceClose()
 	}
 	<-s.sendDoneCh
@@ -399,15 +415,15 @@ func (s *Session) waitForSendErr(hdr header, body []byte, errCh chan error) erro
 		case <-timer.C:
 		default:
 		}
-		timerPool.Put(t)
+		timerPool.Put(t) // 用完之后，重新放回池子中
 	}()
 
 	ready := &sendReady{Hdr: hdr, Body: body, Err: errCh}
 	select {
-	case s.sendCh <- ready:
-	case <-s.shutdownCh:
+	case s.sendCh <- ready: // 发送数据
+	case <-s.shutdownCh: // 如果数据还没发送，此时Session被关闭了，那么只能关闭Session
 		return ErrSessionShutdown
-	case <-timer.C:
+	case <-timer.C: // 如果一个数据迟迟发送不出去，那么直接关闭连接，这里定义的是10万个小时 TODO 为什么定义这么大的一个数？
 		return ErrConnectionWriteTimeout
 	}
 
@@ -426,19 +442,21 @@ func (s *Session) waitForSendErr(hdr header, body []byte, errCh chan error) erro
 		if ready.Body == nil {
 			return // Body was already copied in `send`.
 		}
+
+		// TODO 以前的BODY是怎么处理了？为什么这里需要这么处理？
 		newBody := make([]byte, len(body))
 		copy(newBody, body)
 		ready.Body = newBody
 	}
 
 	select {
-	case err := <-errCh:
+	case err := <-errCh: // 接收数据发送的返回结果，这里其实就是在想底层的TCP连接写入数据，所以错误其实就是写入底层TCP连接的错误
 		return err
 	case <-s.shutdownCh:
-		bodyCopy()
+		bodyCopy() // TODO 拷贝Body的意义何在？
 		return ErrSessionShutdown
 	case <-timer.C:
-		bodyCopy()
+		bodyCopy() // TODO 拷贝Body的意义何在？
 		return ErrConnectionWriteTimeout
 	}
 }
@@ -478,6 +496,7 @@ func (s *Session) send() {
 
 func (s *Session) sendLoop() error {
 	defer close(s.sendDoneCh)
+
 	var bodyBuf bytes.Buffer
 	for {
 		bodyBuf.Reset()
@@ -485,7 +504,8 @@ func (s *Session) sendLoop() error {
 		select {
 		case ready := <-s.sendCh: // 发送数据通道
 			// Send a header if ready
-			if ready.Hdr != nil { // TODO 难道header可以为空？
+			if ready.Hdr != nil { // TODO 难道header可以为空？  从协议定义上看，肯定是不能为空的
+				// 底层连接写入Header
 				_, err := s.conn.Write(ready.Hdr)
 				if err != nil {
 					s.logger.Printf("[ERR] yamux: Failed to write header: %v", err)
@@ -495,6 +515,7 @@ func (s *Session) sendLoop() error {
 				// 每次发送数据的时候其实都需要发送Header，因此在这里不需要置空
 			}
 
+			// TODO 为什么在发送Body的时候需要加锁？ 这里只有一个协程在消费数据，又不会修改里面的数据，我举得是不需要加锁的
 			ready.mu.Lock()
 			if ready.Body != nil {
 				// Copy the body into the buffer to avoid
@@ -512,7 +533,7 @@ func (s *Session) sendLoop() error {
 			ready.mu.Unlock()
 
 			if bodyBuf.Len() > 0 {
-				// Send data from a body if given
+				// Send data from a body if given  写入Body
 				_, err := s.conn.Write(bodyBuf.Bytes())
 				if err != nil {
 					s.logger.Printf("[ERR] yamux: Failed to write body: %v", err)
@@ -551,7 +572,7 @@ func (s *Session) recvLoop() error {
 	defer close(s.recvDoneCh)
 	hdr := header(make([]byte, headerSize))
 	for {
-		// Read the header
+		// Read the header 每次都是先读取Header
 		if _, err := io.ReadFull(s.bufRead, hdr); err != nil {
 			if err != io.EOF && !strings.Contains(err.Error(), "closed") && !strings.Contains(err.Error(), "reset by peer") {
 				s.logger.Printf("[ERR] yamux: Failed to read header: %v", err)
@@ -682,6 +703,7 @@ func (s *Session) handleGoAway(hdr header) error {
 // incomingStream is used to create a new incoming stream
 func (s *Session) incomingStream(id uint32) error {
 	// Reject immediately if we are doing a go away
+	// 如果本地已经关了，那么直接让告诉客户端不让连接
 	if atomic.LoadInt32(&s.localGoAway) == 1 {
 		hdr := header(make([]byte, headerSize))
 		hdr.encode(typeWindowUpdate, flagRST, id, 0)
@@ -689,6 +711,7 @@ func (s *Session) incomingStream(id uint32) error {
 	}
 
 	// Allocate a new stream
+	// 接收方也需要记录当前发送方有哪些流，后需要接收数据就需要区分每个流的数据
 	stream := newStream(s, id, streamSYNReceived)
 
 	s.streamLock.Lock()
@@ -708,9 +731,11 @@ func (s *Session) incomingStream(id uint32) error {
 
 	// Check if we've exceeded the backlog
 	select {
+	// 到了这一步，说明流已经成功建立了，两边的元数据都已经维护好了
 	case s.acceptCh <- stream: // 生产消费模型，这里作为生产者，实例化了一个Stream
 		return nil
 	default:
+		// 已经超过了流的最大限制，直接告诉发送方关闭连接
 		// Backlog exceeded! RST the stream
 		s.logger.Printf("[WARN] yamux: backlog exceeded, forcing connection reset")
 		delete(s.streams, id)

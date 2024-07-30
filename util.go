@@ -15,6 +15,7 @@ type Logger interface {
 var (
 	timerPool = &sync.Pool{
 		New: func() interface{} {
+			// TODO 这里为什么定义这么大的一个定时器？
 			timer := time.NewTimer(time.Hour * 1e6)
 			timer.Stop()
 			return timer

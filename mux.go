@@ -28,6 +28,10 @@ type Config struct {
 
 	// MaxStreamWindowSize is used to control the maximum
 	// window size that we allow for a stream.
+	// 用于控制流允许的最大窗口大小。
+	// TODO 其实就是用于控制每个流每次发送的数据大小，毕竟底层只有一个TCP连接，如果一个流每次都发送非常大的一个数据包，譬如是10G的大小，那么
+	// 在这个流发送数据的时候，其它的Stream肯定无法发送数据，这里必须要保证同一时刻只有一个Stream在使用底层的TCP连接发送数据。否则应用层
+	// 无法区分出数据包的边界
 	MaxStreamWindowSize uint32
 
 	// StreamOpenTimeout is the maximum amount of time that a stream will
@@ -35,6 +39,7 @@ type Config struct {
 	// Once the timeout is reached the session will be gracefully closed.
 	// A zero value disables the StreamOpenTimeout allowing unbounded
 	// blocking on OpenStream calls.
+	// 用于设置流创建的超时时间
 	StreamOpenTimeout time.Duration
 
 	// StreamCloseTimeout is the maximum time that a stream will allowed to

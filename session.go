@@ -66,6 +66,7 @@ type Session struct {
 	synCh chan struct{}
 
 	// acceptCh is used to pass ready streams to the client
+	// 此channel是用于表示Session已经准备好和这个stream建立通信了
 	acceptCh chan *Stream
 
 	// sendCh is used to mark a stream as ready to send,
@@ -98,6 +99,13 @@ type sendReady struct {
 }
 
 // newSession is used to construct a new session
+// 感悟：
+// 1、数据的收发实际上是通过Session来完成的，因为Session中真正持有底层的TCP连接，Stream仅仅是一个逻辑概念，它并不需要直接和底层的TCP
+// 连接打交道
+// 2、Session实例化之后，就应该启动底层TCP数据的收发工作，即启动一个协程专门用于发送数据（从channel获取数据并写入到TCP连接），同时启动
+// 一个协程读取TCP数据。
+// 2.1、再读取数据上面，
+// 3、对于发送数据来说，非常简单，每个Stream只需要调用把数据通过channel的方式发送给Session，S
 func newSession(config *Config, conn io.ReadWriteCloser, client bool) *Session {
 	logger := config.Logger
 	if logger == nil {

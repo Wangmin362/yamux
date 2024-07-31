@@ -509,6 +509,7 @@ func (s *Stream) readData(hdr header, flags uint16, conn io.Reader) error {
 	if s.recvBuf == nil {
 		// Allocate the receive buffer just-in-time to fit the full data frame.
 		// This way we can read in the whole packet without further allocations.
+		// 接收一个完整的包长度
 		s.recvBuf = bytes.NewBuffer(make([]byte, 0, length))
 	}
 	copiedLength, err := io.Copy(s.recvBuf, conn)
@@ -519,6 +520,7 @@ func (s *Stream) readData(hdr header, flags uint16, conn io.Reader) error {
 	}
 
 	// Decrement the receive window
+	// 减少需要接收帧的长度
 	s.recvWindow -= uint32(copiedLength)
 	s.recvLock.Unlock()
 

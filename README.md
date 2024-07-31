@@ -89,3 +89,8 @@ func server() {
 ## Session和Stream这两个概念有何区别？
 
 Session字面意思表示一个会话，其实可以理解为一个TCP连接，而Stream则真正对应连接中的流。
+
+## TODO 
+
+1、理解窗口更新原理
+2、理解Session接收数据的设计，以及Session如何把底层的TCP数据流转交给各个Stream
